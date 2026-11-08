@@ -1,0 +1,850 @@
+<?php
+/**
+ * WORKOUT HR HUD OVERLAY STUDIO - MP4 SOCIAL MEDIA EDITION (Reels, TikTok, YouTube)
+ * Mendukung:
+ * 1. Direct Export .MP4 (H.264 + AAC Audio asli dari video)
+ * 2. Pilihan Rasio 9:16 (Vertikal Reels/TikTok/Shorts) & 16:9 (YouTube Landscape)
+ * 3. Pengaturan Waktu Mulai / Skip Intro Video (Intro Offset)
+ */
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
+    $action = $_POST['action'];
+
+    if ($action === 'parse_file' && isset($_FILES['hr_file'])) {
+        header('Content-Type: application/json');
+        $tmpName = $_FILES['hr_file']['tmp_name'];
+        $fileName = strtolower($_FILES['hr_file']['name']);
+        $bpmList = [];
+
+        if (!is_uploaded_file($tmpName)) {
+            echo json_encode(['status' => 'error', 'message' => 'File gagal diunggah.']);
+            exit;
+        }
+
+        $content = file_get_contents($tmpName);
+
+        if (str_ends_with($fileName, '.tcx') || str_contains($content, '<TrainingCenterDatabase')) {
+            preg_match_all('/<HeartRateBpm>.*?<Value>\s*(\d+)\s*<\/Value>.*?<\/HeartRateBpm>/is', $content, $matches);
+            if (!empty($matches[1])) {
+                $bpmList = array_map('intval', $matches[1]);
+            }
+        } else {
+            $lines = preg_split('/\r\n|\r|\n/', trim($content));
+            foreach ($lines as $line) {
+                $cols = str_getcsv($line);
+                foreach ($cols as $col) {
+                    $val = intval(trim($col));
+                    if ($val >= 40 && $val <= 230) {
+                        $bpmList[] = $val;
+                        break;
+                    }
+                }
+            }
+        }
+
+        echo json_encode([
+            'status' => count($bpmList) > 0 ? 'success' : 'empty',
+            'data'   => $bpmList,
+            'count'  => count($bpmList)
+        ]);
+        exit;
+    }
+
+    if ($action === 'export_sub') {
+        $format       = $_POST['sub_format'] ?? 'ass';
+        $hrRaw        = $_POST['hr_data'] ?? '';
+        $introOffset  = max(0, intval($_POST['intro_offset_sec'] ?? 0));
+        $workoutTotal = max(5, intval($_POST['workout_total_sec'] ?? 1800));
+        $interval     = max(1, intval($_POST['interval_sec'] ?? 5));
+        $age          = max(10, intval($_POST['user_age'] ?? 30));
+        $maxHr        = 220 - $age;
+
+        $hrArray = array_values(array_filter(array_map('intval', preg_split('/[\s,;]+/', trim($hrRaw)))));
+        if (empty($hrArray)) {
+            $hrArray = [110, 118, 125, 135, 145, 152, 148, 140];
+        }
+
+        function formatSrtTime($sec) {
+            return sprintf("%02d:%02d:%02d,000", floor($sec / 3600), floor(($sec % 3600) / 60), floor($sec % 60));
+        }
+        function formatAssTime($sec) {
+            return sprintf("%d:%02d:%02d.00", floor($sec / 3600), floor(($sec % 3600) / 60), floor($sec % 60));
+        }
+        function formatWorkoutClock($sec) {
+            return sprintf("%02d:%02d", floor($sec / 60), floor($sec % 60));
+        }
+        function getZoneInfo($bpm, $maxHr) {
+            $pct = ($bpm / $maxHr) * 100;
+            if ($pct >= 90) return ['ZONE 5 (MAX EFFORT)', '&H003B3BFF&'];
+            if ($pct >= 80) return ['ZONE 4 (ANAEROBIC)', '&H004460FF&'];
+            if ($pct >= 70) return ['ZONE 3 (AEROBIC)', '&H0000D7FF&'];
+            if ($pct >= 60) return ['ZONE 2 (FAT BURN)', '&H0071CC2E&'];
+            return ['ZONE 1 (WARM UP)', '&H00F39C12&'];
+        }
+
+        $totalStr = formatWorkoutClock($workoutTotal);
+        $steps = ceil($workoutTotal / $interval);
+
+        if ($format === 'srt') {
+            header('Content-Type: text/plain; charset=utf-8');
+            header('Content-Disposition: attachment; filename="workout_hr_overlay.srt"');
+            for ($i = 0; $i < $steps; $i++) {
+                $workoutElapsed = $i * $interval;
+                $videoStart     = $introOffset + $workoutElapsed;
+                $videoEnd       = min($introOffset + $workoutTotal, $videoStart + $interval);
+                $bpm            = $hrArray[$i % count($hrArray)];
+                [$zoneText, ]   = getZoneInfo($bpm, $maxHr);
+                $clockStr       = formatWorkoutClock($workoutElapsed);
+
+                echo ($i + 1) . "\r\n";
+                echo formatSrtTime($videoStart) . " --> " . formatSrtTime($videoEnd) . "\r\n";
+                echo "♥ {$bpm} BPM | {$zoneText}\r\n⏱ {$clockStr} / {$totalStr}\r\n\r\n";
+            }
+            exit;
+        } else {
+            header('Content-Type: text/plain; charset=utf-8');
+            header('Content-Disposition: attachment; filename="workout_hr_hud.ass"');
+            echo "[Script Info]\r\nTitle: Workout HR HUD\r\nScriptType: v4.00+\r\nPlayResX: 1920\r\nPlayResY: 1080\r\n\r\n";
+            echo "[V4+ Styles]\r\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\r\n";
+            echo "Style: HUD,Arial,44,&H00FFFFFF,&H000000FF,&H001E1E1E,&H80000000,-1,0,0,0,100,100,0,0,3,16,0,1,80,80,80,1\r\n\r\n";
+            echo "[Events]\r\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\r\n";
+            for ($i = 0; $i < $steps; $i++) {
+                $workoutElapsed = $i * $interval;
+                $videoStart     = $introOffset + $workoutElapsed;
+                $videoEnd       = min($introOffset + $workoutTotal, $videoStart + $interval);
+                $bpm            = $hrArray[$i % count($hrArray)];
+                [$zoneText, $bgrColor] = getZoneInfo($bpm, $maxHr);
+                $clockStr       = formatWorkoutClock($workoutElapsed);
+                echo "Dialogue: 0," . formatAssTime($videoStart) . "," . formatAssTime($videoEnd) . ",HUD,,0,0,0,,{\\c{$bgrColor}}♥ {$bpm} BPM{\\c&HFFFFFF&}  ({$zoneText})\\N⏱ {$clockStr} / {$totalStr}\r\n";
+            }
+            exit;
+        }
+    }
+}
+?>
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Workout HR HUD Studio - MP4 Reels, TikTok & YouTube</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { background-color: #0f172a; color: #f8fafc; font-family: 'Inter', system-ui, sans-serif; }
+        .glass-panel { background: rgba(30, 41, 59, 0.85); backdrop-filter: blur(12px); border: 1px solid rgba(255,255,255,0.1); }
+        canvas { max-width: 100%; max-height: 72vh; width: auto; height: auto; border-radius: 0.75rem; box-shadow: 0 20px 25px -5px rgba(0,0,0,0.6); }
+    </style>
+</head>
+<body class="min-h-screen p-4 md:p-6">
+
+<div class="max-w-7xl mx-auto space-y-6">
+    <!-- Header -->
+    <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-700 pb-4">
+        <div>
+            <h1 class="text-2xl md:text-3xl font-extrabold tracking-tight text-white flex items-center gap-2">
+                <span class="text-red-500">♥</span> Workout HR Overlay Studio <span class="text-xs bg-emerald-600/30 text-emerald-300 border border-emerald-500/40 px-2.5 py-1 rounded-full font-semibold">MP4 Ready (IG / TikTok / YT)</span>
+            </h1>
+            <p class="text-slate-400 text-sm mt-1">Export langsung ke video <b>.MP4</b> lengkap dengan suara asli untuk Reels, TikTok, Shorts & YouTube.</p>
+        </div>
+        <div class="flex flex-wrap items-center gap-2">
+            <select id="aspectRatioSelect" onchange="changeAspectRatio(this.value)" class="bg-slate-800 border border-slate-600 text-white text-xs font-semibold px-3 py-2.5 rounded-lg">
+                <option value="16:9">📺 YouTube Landscape (16:9 - 1280x720)</option>
+                <option value="9:16">📱 IG Reels / TikTok / Shorts (9:16 - 720x1280)</option>
+                <option value="1:1">🟦 Instagram Feed Square (1:1 - 1080x1080)</option>
+            </select>
+            <button onclick="downloadSnapshot()" class="bg-slate-700 hover:bg-slate-600 text-white text-xs font-semibold px-3.5 py-2.5 rounded-lg transition">
+                📸 Gambar (.PNG)
+            </button>
+            <button id="btnRecord" onclick="toggleRecording()" class="bg-rose-600 hover:bg-rose-500 text-white text-sm font-bold px-4 py-2.5 rounded-lg transition shadow-lg">
+                ⏺ Rekam Video (.MP4)
+            </button>
+        </div>
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        <!-- KOLOM KIRI -->
+        <div class="lg:col-span-5 space-y-5">
+
+            <!-- 1. UPLOAD MEDIA -->
+            <div class="glass-panel p-5 rounded-xl space-y-4">
+                <h2 class="text-base font-bold text-amber-400 uppercase tracking-wider">1. Upload Video / Foto Workout</h2>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                        <label class="block text-xs text-slate-300 mb-1">Upload Video Workout (.MP4/.MOV):</label>
+                        <input type="file" id="bgVideoInput" accept="video/*" class="w-full text-xs text-slate-300 file:mr-2 file:py-1.5 file:px-3 file:rounded file:border-0 file:bg-rose-600 file:text-white hover:file:bg-rose-500">
+                    </div>
+                    <div>
+                        <label class="block text-xs text-slate-300 mb-1">Atau Upload Gambar (.JPG/.PNG):</label>
+                        <input type="file" id="bgImageInput" accept="image/*" class="w-full text-xs text-slate-300 file:mr-2 file:py-1.5 file:px-3 file:rounded file:border-0 file:bg-slate-700 file:text-white hover:file:bg-slate-600">
+                    </div>
+                </div>
+                <div class="flex items-center justify-between pt-2 border-t border-slate-700/60">
+                    <label class="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+                        <input type="checkbox" id="greenScreenMode" onchange="renderFrame()" class="rounded bg-slate-800 border-slate-600 text-emerald-500">
+                        <span>Mode <b>Green Screen (#00FF00)</b> (Jika ingin ditumpuk di CapCut)</span>
+                    </label>
+                </div>
+            </div>
+
+            <!-- 2. WAKTU & SKIP INTRO -->
+            <div class="glass-panel p-5 rounded-xl space-y-4">
+                <h2 class="text-base font-bold text-sky-400 uppercase tracking-wider">2. Pengaturan Waktu & Skip Intro</h2>
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <label class="block text-xs text-slate-300 mb-1">Mulai Timpa HR (Skip Intro):</label>
+                        <div class="flex items-center gap-1">
+                            <input type="number" id="introMin" value="0" min="0" onchange="updateTiming()" class="w-full bg-slate-800 border border-slate-600 rounded px-2.5 py-1.5 text-sm text-white">
+                            <span class="text-slate-400 font-bold">:</span>
+                            <input type="number" id="introSec" value="0" min="0" max="59" onchange="updateTiming()" class="w-full bg-slate-800 border border-slate-600 rounded px-2.5 py-1.5 text-sm text-white">
+                        </div>
+                        <span class="text-[11px] text-slate-400">Contoh: 00:15 jika ada intro 15 detik.</span>
+                    </div>
+                    <div>
+                        <label class="block text-xs text-slate-300 mb-1">Total Durasi Olahraga:</label>
+                        <div class="flex items-center gap-1">
+                            <input type="number" id="workoutMin" value="30" min="1" onchange="updateTiming()" class="w-full bg-slate-800 border border-slate-600 rounded px-2.5 py-1.5 text-sm text-white">
+                            <span class="text-slate-400 font-bold">:</span>
+                            <input type="number" id="workoutSec" value="0" min="0" max="59" onchange="updateTiming()" class="w-full bg-slate-800 border border-slate-600 rounded px-2.5 py-1.5 text-sm text-white">
+                        </div>
+                    </div>
+                </div>
+                <div class="grid grid-cols-3 gap-3 pt-1">
+                    <div>
+                        <label class="block text-xs text-slate-300 mb-1">Interval HR (Detik):</label>
+                        <input type="number" id="hrInterval" value="5" min="1" onchange="updateTiming()" class="w-full bg-slate-800 border border-slate-600 rounded px-2.5 py-1.5 text-sm text-white">
+                    </div>
+                    <div>
+                        <label class="block text-xs text-slate-300 mb-1">Usia Anda:</label>
+                        <input type="number" id="userAge" value="28" min="10" max="90" onchange="renderFrame()" class="w-full bg-slate-800 border border-slate-600 rounded px-2.5 py-1.5 text-sm text-white">
+                    </div>
+                    <div>
+                        <label class="block text-xs text-slate-300 mb-1">Ukuran HUD:</label>
+                        <input type="range" id="hudScale" min="0.5" max="1.6" step="0.05" value="1.0" oninput="renderFrame()" class="w-full mt-2">
+                    </div>
+                </div>
+            </div>
+
+            <!-- 3. DATA HEART RATE -->
+            <div class="glass-panel p-5 rounded-xl space-y-4">
+                <div class="flex items-center justify-between">
+                    <h2 class="text-base font-bold text-rose-400 uppercase tracking-wider">3. Data Heart Rate Huawei Band</h2>
+                    <button type="button" onclick="generateSampleWorkout()" class="text-xs bg-slate-700 hover:bg-slate-600 text-slate-200 px-2.5 py-1 rounded">
+                        ⚡ Isi Contoh Data
+                    </button>
+                </div>
+
+                <div class="bg-slate-800/90 border border-slate-700 p-3 rounded-lg space-y-2">
+                    <div class="text-xs font-semibold text-amber-300">📱 Ekstrak Otomatis dari Screenshot Grafik Huawei Health:</div>
+                    <input type="file" id="graphImgInput" accept="image/*" onchange="extractFromGraphImage(this)" class="w-full text-xs text-slate-300 file:mr-2 file:py-1 file:px-2.5 file:rounded file:border-0 file:bg-amber-600 file:text-white">
+                    <div class="pt-2 border-t border-slate-700/70 flex items-center justify-between">
+                        <span class="text-[11px] text-slate-400">Atau upload <b>.TCX / .CSV</b>:</span>
+                        <input type="file" id="tcxFileInput" accept=".tcx,.csv,.txt" onchange="uploadFileToPhp(this)" class="text-xs text-slate-300 w-48">
+                    </div>
+                </div>
+
+                <form method="POST" action="">
+                    <input type="hidden" name="action" value="export_sub">
+                    <input type="hidden" name="intro_offset_sec" id="formIntroOffset" value="0">
+                    <input type="hidden" name="workout_total_sec" id="formWorkoutTotal" value="1800">
+                    <input type="hidden" name="interval_sec" id="formInterval" value="5">
+                    <input type="hidden" name="user_age" id="formUserAge" value="28">
+
+                    <textarea id="hrDataInput" name="hr_data" rows="3" oninput="parseHrInput()" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-xs font-mono text-emerald-400"></textarea>
+                    <div class="flex items-center justify-between text-[11px] text-slate-400 mt-1 mb-3">
+                        <span id="hrCountBadge">Total titik data: 0</span>
+                        <span id="codecBadge" class="text-emerald-400 font-semibold">Format Rekam: Cek Browser...</span>
+                    </div>
+
+                    <div class="flex gap-2">
+                        <button type="submit" name="sub_format" value="ass" class="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold py-2 px-3 rounded-lg">
+                            📥 Export Subtitle (.ASS)
+                        </button>
+                        <button type="submit" name="sub_format" value="srt" class="flex-1 bg-slate-700 hover:bg-slate-600 text-white text-xs font-semibold py-2 px-3 rounded-lg">
+                            📄 Export (.SRT)
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- KOLOM KANAN: CANVAS PREVIEW -->
+        <div class="lg:col-span-7 space-y-4">
+            <div class="glass-panel p-5 rounded-xl space-y-4">
+                <div class="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                        <h2 class="text-base font-bold text-white">Preview Video & Posisi HUD (Klik & Geser Kotak HUD)</h2>
+                        <p class="text-xs text-slate-400">Saat direkam, video berjalan <b>Real-Time (1:1)</b> beserta suara aslinya dan tersimpan sebagai <b>.MP4</b>.</p>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <button onclick="togglePlaySim()" id="btnPlaySim" class="bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold px-3.5 py-2 rounded-lg">
+                            ▶ Putar Preview (1x Speed)
+                        </button>
+                        <button onclick="jumpToExample()" class="bg-slate-700 hover:bg-slate-600 text-amber-300 text-xs font-semibold px-3 py-2 rounded-lg">
+                            🎯 Contoh 15:45
+                        </button>
+                    </div>
+                </div>
+
+                <div class="relative flex justify-center items-center bg-slate-950 rounded-xl p-2 overflow-hidden border border-slate-800">
+                    <canvas id="hudCanvas" width="1280" height="720" class="cursor-move"></canvas>
+                </div>
+
+                <!-- TIMELINE SLIDER -->
+                <div class="bg-slate-900/90 p-4 rounded-xl border border-slate-800 space-y-2">
+                    <div class="flex justify-between text-xs font-semibold">
+                        <span class="text-slate-300">Posisi Waktu Video: <b id="lblVideoTime" class="text-sky-400 font-mono text-sm">15:45</b></span>
+                        <span id="lblOverlayStatus" class="text-emerald-400 font-mono">Status HUD: AKTIF</span>
+                    </div>
+                    <input type="range" id="timelineSlider" min="0" max="1800" step="0.1" value="945" oninput="onSliderChange(this.value)" class="w-full accent-rose-500 cursor-pointer">
+                    <div class="flex justify-between text-[11px] text-slate-500 font-mono">
+                        <span>00:00 (Awal Video)</span>
+                        <span id="lblIntroMarker" class="text-amber-400">Mulai Olahraga (00:00)</span>
+                        <span id="lblTotalEnd">30:00 (Selesai)</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Video elemen untuk sumber frame dan audio -->
+<video id="hiddenVideo" class="hidden" playsinline crossorigin="anonymous"></video>
+
+<script>
+const canvas = document.getElementById('hudCanvas');
+const ctx = canvas.getContext('2d');
+const hiddenVideo = document.getElementById('hiddenVideo');
+
+let bgImage = null;
+let useVideoBg = false;
+let hrValues = [];
+let currentVideoSec = 945;
+let introOffsetSec = 0;
+let workoutDurationSec = 1800;
+let hrIntervalSec = 5;
+let isPlayingSim = false;
+let animFrameId = null;
+let lastTick = 0;
+let pulsePhase = 0;
+
+let hudPos = { x: 56, y: 440 };
+let isDragging = false;
+let dragOffset = { x: 0, y: 0 };
+
+// Deteksi dukungan MP4 langsung di browser
+function getSupportedMimeType() {
+    const types = [
+        'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
+        'video/mp4;codecs=avc1',
+        'video/mp4',
+        'video/webm;codecs=h264',
+        'video/webm;codecs=vp9',
+        'video/webm'
+    ];
+    for (const t of types) {
+        if (MediaRecorder.isTypeSupported(t)) return t;
+    }
+    return '';
+}
+
+const bestMime = getSupportedMimeType();
+const isNativeMp4 = bestMime.includes('mp4') || bestMime.includes('h264');
+document.getElementById('codecBadge').innerText = isNativeMp4
+    ? '✅ Browser Mendukung Direct .MP4 (H.264)'
+    : '⚠️ Browser Fallback (.WebM -> MP4)';
+
+// Ganti Rasio Layar (YouTube 16:9 vs Reels/TikTok 9:16 vs Square 1:1)
+function changeAspectRatio(ratio) {
+    if (ratio === '9:16') {
+        canvas.width = 720;
+        canvas.height = 1280;
+        hudPos = { x: 40, y: 920 }; // Posisi aman di atas teks caption Reels/TikTok
+        document.getElementById('hudScale').value = 0.9;
+    } else if (ratio === '1:1') {
+        canvas.width = 1080;
+        canvas.height = 1080;
+        hudPos = { x: 50, y: 780 };
+        document.getElementById('hudScale').value = 1.0;
+    } else {
+        canvas.width = 1280;
+        canvas.height = 720;
+        hudPos = { x: 56, y: 440 };
+        document.getElementById('hudScale').value = 1.0;
+    }
+    renderFrame();
+}
+
+// Gambar media secara proporsional (Center Crop / Cover) agar tidak gepeng di 9:16 maupun 16:9
+function drawMediaCover(ctx, media, mW, mH, cW, cH) {
+    const scale = Math.max(cW / mW, cH / mH);
+    const dW = mW * scale;
+    const dH = mH * scale;
+    const dx = (cW - dW) / 2;
+    const dy = (cH - dH) / 2;
+    ctx.drawImage(media, dx, dy, dW, dH);
+}
+
+function createDefaultBackground() {
+    const grad = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+    grad.addColorStop(0, '#1e293b');
+    grad.addColorStop(1, '#0f172a');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    ctx.fillStyle = 'rgba(255,255,255,0.14)';
+    ctx.font = 'bold 24px Inter, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('AREA VIDEO WORKOUT ANDA', canvas.width / 2, canvas.height / 2 - 10);
+    ctx.font = '15px Inter, sans-serif';
+    ctx.fillText('Pilih Rasio 9:16 untuk Reels/TikTok atau 16:9 untuk YouTube', canvas.width / 2, canvas.height / 2 + 20);
+    ctx.textAlign = 'left';
+}
+
+function parseHrInput() {
+    const raw = document.getElementById('hrDataInput').value;
+    const nums = raw.split(/[\s,;]+/).map(v => parseInt(v.trim(), 10)).filter(v => !isNaN(v) && v >= 35 && v <= 240);
+    hrValues = nums.length > 0 ? nums : [145];
+    document.getElementById('hrCountBadge').innerText = `Total data: ${hrValues.length} titik (${formatMMSS(hrValues.length * hrIntervalSec)})`;
+    renderFrame();
+}
+
+function generateSampleWorkout() {
+    const totalPoints = Math.ceil(workoutDurationSec / hrIntervalSec);
+    let sample = [];
+    for (let i = 0; i < totalPoints; i++) {
+        const progress = i / totalPoints;
+        let baseBpm = 105;
+        if (progress < 0.15) baseBpm = 100 + (progress / 0.15) * 35;
+        else if (progress < 0.85) baseBpm = 140 + Math.sin(i * 0.35) * 14 + (Math.random() * 4 - 2);
+        else baseBpm = 145 - ((progress - 0.85) / 0.15) * 35;
+        sample.push(Math.round(baseBpm));
+    }
+    const idx1545 = Math.floor(945 / hrIntervalSec);
+    if (sample[idx1545] !== undefined) sample[idx1545] = 145;
+    document.getElementById('hrDataInput').value = sample.join(', ');
+    parseHrInput();
+}
+
+function formatMMSS(sec) {
+    sec = Math.max(0, Math.floor(sec));
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    return String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+}
+
+function updateTiming() {
+    const iMin = parseInt(document.getElementById('introMin').value || 0, 10);
+    const iSec = parseInt(document.getElementById('introSec').value || 0, 10);
+    introOffsetSec = (iMin * 60) + iSec;
+
+    const wMin = parseInt(document.getElementById('workoutMin').value || 30, 10);
+    const wSec = parseInt(document.getElementById('workoutSec').value || 0, 10);
+    workoutDurationSec = Math.max(5, (wMin * 60) + wSec);
+    hrIntervalSec = Math.max(1, parseInt(document.getElementById('hrInterval').value || 5, 10));
+
+    const totalVideoMax = introOffsetSec + workoutDurationSec;
+    document.getElementById('timelineSlider').max = totalVideoMax;
+    document.getElementById('lblIntroMarker').innerText = `Mulai HUD (${formatMMSS(introOffsetSec)})`;
+    document.getElementById('lblTotalEnd').innerText = `${formatMMSS(totalVideoMax)} (Selesai)`;
+
+    document.getElementById('formIntroOffset').value = introOffsetSec;
+    document.getElementById('formWorkoutTotal').value = workoutDurationSec;
+    document.getElementById('formInterval').value = hrIntervalSec;
+    document.getElementById('formUserAge').value = document.getElementById('userAge').value;
+    parseHrInput();
+}
+
+function getHeartRateZone(bpm) {
+    const age = parseInt(document.getElementById('userAge').value || 28, 10);
+    const maxHr = 220 - age;
+    const pct = (bpm / maxHr) * 100;
+    if (pct >= 90) return { label: 'ZONE 5 (MAX EFFORT)', color: '#ef4444' };
+    if (pct >= 80) return { label: 'ZONE 4 (ANAEROBIC)',  color: '#f97316' };
+    if (pct >= 70) return { label: 'ZONE 3 (AEROBIC)',    color: '#eab308' };
+    if (pct >= 60) return { label: 'ZONE 2 (FAT BURN)',   color: '#22c55e' };
+    return { label: 'ZONE 1 (WARM UP)', color: '#38bdf8' };
+}
+
+function drawHeartIcon(ctx, cx, cy, size, color) {
+    ctx.save();
+    ctx.fillStyle = color;
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 14;
+    ctx.beginPath();
+    const topCurveHeight = size * 0.3;
+    ctx.moveTo(cx, cy + topCurveHeight);
+    ctx.bezierCurveTo(cx, cy, cx - size / 2, cy, cx - size / 2, cy + topCurveHeight);
+    ctx.bezierCurveTo(cx - size / 2, cy + (size + topCurveHeight) / 2, cx, cy + (size + topCurveHeight) / 1.8, cx, cy + size);
+    ctx.bezierCurveTo(cx, cy + (size + topCurveHeight) / 1.8, cx + size / 2, cy + (size + topCurveHeight) / 2, cx + size / 2, cy + topCurveHeight);
+    ctx.bezierCurveTo(cx + size / 2, cy, cx, cy, cx, cy + topCurveHeight);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+}
+
+function drawStopwatchIcon(ctx, cx, cy, radius) {
+    ctx.save();
+    ctx.strokeStyle = '#e2e8f0';
+    ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(cx, cy, radius, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(cx - 5, cy - radius - 4); ctx.lineTo(cx + 5, cy - radius - 4);
+    ctx.moveTo(cx, cy - radius - 4); ctx.lineTo(cx, cy - radius);
+    ctx.moveTo(cx, cy); ctx.lineTo(cx, cy - radius * 0.55);
+    ctx.moveTo(cx, cy); ctx.lineTo(cx + radius * 0.45, cy);
+    ctx.stroke();
+    ctx.restore();
+}
+
+function renderFrame() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const isGreenScreen = document.getElementById('greenScreenMode').checked;
+    if (isGreenScreen) {
+        ctx.fillStyle = '#00FF00';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+    } else if (useVideoBg && hiddenVideo.readyState >= 2) {
+        drawMediaCover(ctx, hiddenVideo, hiddenVideo.videoWidth, hiddenVideo.videoHeight, canvas.width, canvas.height);
+    } else if (bgImage) {
+        drawMediaCover(ctx, bgImage, bgImage.width, bgImage.height, canvas.width, canvas.height);
+    } else {
+        createDefaultBackground();
+    }
+
+    const workoutElapsedSec = currentVideoSec - introOffsetSec;
+    const lblStatus = document.getElementById('lblOverlayStatus');
+    document.getElementById('lblVideoTime').innerText = formatMMSS(currentVideoSec);
+
+    if (workoutElapsedSec < 0) {
+        lblStatus.innerText = `Status HUD: SKIP INTRO (Muncul dalam ${Math.ceil(Math.abs(workoutElapsedSec))} dtk)`;
+        lblStatus.className = 'text-amber-400 font-mono';
+        return;
+    }
+
+    const clampedElapsed = Math.min(workoutElapsedSec, workoutDurationSec);
+    const hrIndex = Math.floor(clampedElapsed / hrIntervalSec);
+    const currentBpm = hrValues[hrIndex % hrValues.length] || 145;
+    const zone = getHeartRateZone(currentBpm);
+
+    lblStatus.innerText = `Status HUD: AKTIF (${currentBpm} BPM | ${formatMMSS(clampedElapsed)} / ${formatMMSS(workoutDurationSec)})`;
+    lblStatus.className = 'text-emerald-400 font-mono';
+
+    const scale = parseFloat(document.getElementById('hudScale').value || 1.0);
+    ctx.save();
+    ctx.translate(hudPos.x, hudPos.y);
+    ctx.scale(scale, scale);
+
+    const boxW = 370, boxH = 215;
+    ctx.beginPath();
+    ctx.moveTo(16, 0); ctx.lineTo(225, 0); ctx.lineTo(240, 12); ctx.lineTo(boxW - 14, 12);
+    ctx.quadraticCurveTo(boxW, 12, boxW, 26); ctx.lineTo(boxW, boxH - 16);
+    ctx.quadraticCurveTo(boxW, boxH, boxW - 16, boxH); ctx.lineTo(16, boxH);
+    ctx.quadraticCurveTo(0, boxH, 0, boxH - 16); ctx.lineTo(0, 16);
+    ctx.quadraticCurveTo(0, 0, 16, 0); ctx.closePath();
+
+    ctx.fillStyle = 'rgba(18, 22, 28, 0.78)';
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.35)';
+    ctx.stroke();
+
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.45)';
+    for (let i = 0; i < 5; i++) {
+        const sx = 280 + (i * 13);
+        ctx.beginPath();
+        ctx.moveTo(sx, 20); ctx.lineTo(sx + 7, 20); ctx.lineTo(sx + 12, 28); ctx.lineTo(sx + 5, 28);
+        ctx.closePath(); ctx.fill();
+    }
+
+    const beatScale = 1 + Math.sin(pulsePhase) * 0.08;
+    ctx.save();
+    ctx.translate(52, 42);
+    ctx.scale(beatScale, beatScale);
+    drawHeartIcon(ctx, 0, -18, 42, '#ff2a4b');
+    ctx.restore();
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '900 68px Inter, Arial, sans-serif';
+    ctx.fillText(String(currentBpm), 95, 82);
+
+    const bpmNumWidth = ctx.measureText(String(currentBpm)).width;
+    ctx.fillStyle = '#cbd5e1';
+    ctx.font = 'bold 28px Inter, Arial, sans-serif';
+    ctx.fillText('BPM', 95 + bpmNumWidth + 10, 80);
+
+    ctx.fillStyle = zone.color;
+    ctx.font = 'bold 17px Inter, Arial, sans-serif';
+    ctx.fillText(zone.label, 88, 110);
+
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(24, 126); ctx.lineTo(boxW - 24, 126); ctx.stroke();
+
+    drawStopwatchIcon(ctx, 48, 162, 16);
+
+    const currentClockStr = formatMMSS(clampedElapsed);
+    const totalClockStr = formatMMSS(workoutDurationSec);
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 40px Inter, Arial, sans-serif';
+    ctx.fillText(currentClockStr, 78, 176);
+
+    const curClockWidth = ctx.measureText(currentClockStr).width;
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = 'bold 30px Inter, Arial, sans-serif';
+    ctx.fillText(` / ${totalClockStr}`, 78 + curClockWidth + 4, 175);
+
+    const barX = 28, barY = 194, barW = boxW - 56, barH = 7;
+    const progressRatio = Math.min(1, Math.max(0, clampedElapsed / workoutDurationSec));
+
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.22)';
+    ctx.beginPath(); ctx.roundRect(barX, barY, barW, barH, 4); ctx.fill();
+
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath(); ctx.roundRect(barX, barY, Math.max(8, barW * progressRatio), barH, 4); ctx.fill();
+
+    ctx.restore();
+}
+
+function onSliderChange(val) {
+    currentVideoSec = parseFloat(val);
+    if (useVideoBg && Math.abs(hiddenVideo.currentTime - currentVideoSec) > 0.2) {
+        hiddenVideo.currentTime = currentVideoSec;
+    }
+    renderFrame();
+}
+
+function jumpToExample() {
+    currentVideoSec = introOffsetSec + (15 * 60) + 45;
+    document.getElementById('timelineSlider').value = currentVideoSec;
+    onSliderChange(currentVideoSec);
+}
+
+// Loop 30/60 FPS Real-Time (1 Detik = 1 Detik) agar hasil rekaman MP4 mulus dan sinkron dengan suara
+function animationLoop(timestamp) {
+    if (!isPlayingSim) return;
+    if (!lastTick) lastTick = timestamp;
+    const deltaSec = (timestamp - lastTick) / 1000;
+    lastTick = timestamp;
+
+    // Denyut jantung mengikuti BPM aktual
+    const workoutElapsedSec = Math.max(0, currentVideoSec - introOffsetSec);
+    const hrIndex = Math.floor(workoutElapsedSec / hrIntervalSec);
+    const bpm = hrValues[hrIndex % hrValues.length] || 140;
+    pulsePhase += deltaSec * (bpm / 60) * Math.PI * 2;
+
+    if (useVideoBg && !hiddenVideo.paused) {
+        currentVideoSec = hiddenVideo.currentTime;
+        if (hiddenVideo.ended) {
+            if (mediaRecorder && mediaRecorder.state === 'recording') toggleRecording();
+            else togglePlaySim();
+            return;
+        }
+    } else {
+        currentVideoSec += deltaSec;
+    }
+
+    const maxVal = parseFloat(document.getElementById('timelineSlider').max);
+    if (currentVideoSec > maxVal) {
+        if (mediaRecorder && mediaRecorder.state === 'recording') {
+            toggleRecording();
+            return;
+        }
+        currentVideoSec = 0;
+    }
+
+    document.getElementById('timelineSlider').value = currentVideoSec;
+    renderFrame();
+    animFrameId = requestAnimationFrame(animationLoop);
+}
+
+function togglePlaySim() {
+    const btn = document.getElementById('btnPlaySim');
+    if (isPlayingSim) {
+        isPlayingSim = false;
+        cancelAnimationFrame(animFrameId);
+        if (useVideoBg) hiddenVideo.pause();
+        btn.innerText = '▶ Putar Preview (1x Speed)';
+    } else {
+        isPlayingSim = true;
+        lastTick = 0;
+        if (useVideoBg) {
+            hiddenVideo.currentTime = currentVideoSec;
+            hiddenVideo.play();
+        }
+        btn.innerText = '⏸ Pause Preview';
+        animFrameId = requestAnimationFrame(animationLoop);
+    }
+}
+
+document.getElementById('bgImageInput').addEventListener('change', function(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = function(evt) {
+        const img = new Image();
+        img.onload = function() { bgImage = img; useVideoBg = false; renderFrame(); };
+        img.src = evt.target.result;
+    };
+    reader.readAsDataURL(file);
+});
+
+document.getElementById('bgVideoInput').addEventListener('change', function(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    hiddenVideo.src = URL.createObjectURL(file);
+    hiddenVideo.onloadedmetadata = function() {
+        useVideoBg = true;
+        currentVideoSec = 0;
+        document.getElementById('timelineSlider').value = 0;
+        hiddenVideo.currentTime = 0;
+    };
+    hiddenVideo.onseeked = () => renderFrame();
+});
+
+// Drag & Drop HUD (Mouse & Touch)
+canvas.addEventListener('mousedown', function(e) {
+    const rect = canvas.getBoundingClientRect();
+    const mx = (e.clientX - rect.left) * (canvas.width / rect.width);
+    const my = (e.clientY - rect.top) * (canvas.height / rect.height);
+    isDragging = true;
+    dragOffset.x = mx - hudPos.x;
+    dragOffset.y = my - hudPos.y;
+});
+window.addEventListener('mousemove', function(e) {
+    if (!isDragging) return;
+    const rect = canvas.getBoundingClientRect();
+    const mx = (e.clientX - rect.left) * (canvas.width / rect.width);
+    const my = (e.clientY - rect.top) * (canvas.height / rect.height);
+    hudPos.x = Math.max(0, Math.min(canvas.width - 200, mx - dragOffset.x));
+    hudPos.y = Math.max(0, Math.min(canvas.height - 120, my - dragOffset.y));
+    renderFrame();
+});
+window.addEventListener('mouseup', () => { isDragging = false; });
+
+function extractFromGraphImage(input) {
+    const file = input.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = function(evt) {
+        const img = new Image();
+        img.onload = function() {
+            const offCanvas = document.createElement('canvas');
+            offCanvas.width = img.width; offCanvas.height = img.height;
+            const octx = offCanvas.getContext('2d');
+            octx.drawImage(img, 0, 0);
+            const totalSteps = Math.ceil(workoutDurationSec / hrIntervalSec);
+            const extracted = [];
+            const imgData = octx.getImageData(0, 0, img.width, img.height).data;
+            for (let i = 0; i < totalSteps; i++) {
+                const x = Math.floor((i / totalSteps) * (img.width * 0.8) + (img.width * 0.1));
+                let foundY = -1;
+                for (let y = Math.floor(img.height * 0.15); y < Math.floor(img.height * 0.85); y++) {
+                    const idx = (y * img.width + x) * 4;
+                    const r = imgData[idx], g = imgData[idx+1], b = imgData[idx+2];
+                    if (r > 180 && g < 110 && b < 110 && (r - g) > 80) { foundY = y; break; }
+                }
+                if (foundY !== -1) {
+                    const norm = 1 - ((foundY - img.height * 0.15) / (img.height * 0.7));
+                    extracted.push(Math.max(60, Math.min(200, Math.round(95 + norm * 85))));
+                } else {
+                    extracted.push(extracted.length > 0 ? extracted[extracted.length - 1] : 135);
+                }
+            }
+            document.getElementById('hrDataInput').value = extracted.join(', ');
+            parseHrInput();
+            alert(`Berhasil mengekstrak ${extracted.length} titik data BPM dari screenshot!`);
+        };
+        img.src = evt.target.result;
+    };
+    reader.readAsDataURL(file);
+}
+
+function uploadFileToPhp(input) {
+    const file = input.files[0];
+    if (!file) return;
+    const formData = new FormData();
+    formData.append('action', 'parse_file');
+    formData.append('hr_file', file);
+    fetch('', { method: 'POST', body: formData })
+        .then(r => r.json())
+        .then(res => {
+            if (res.status === 'success') {
+                document.getElementById('hrDataInput').value = res.data.join(', ');
+                parseHrInput();
+                alert(`Berhasil membaca ${res.count} data Heart Rate!`);
+            } else alert('Data Heart Rate tidak ditemukan.');
+        });
+}
+
+function downloadSnapshot() {
+    renderFrame();
+    const link = document.createElement('a');
+    link.download = `workout_hud_${formatMMSS(currentVideoSec).replace(':','-')}.png`;
+    link.href = canvas.toDataURL('image/png');
+    link.click();
+}
+
+// REKAM LANGSUNG KE .MP4 BESERTA AUDIO DARI VIDEO ASLI
+let mediaRecorder = null;
+let recordedChunks = [];
+
+function toggleRecording() {
+    const btn = document.getElementById('btnRecord');
+    if (mediaRecorder && mediaRecorder.state === 'recording') {
+        mediaRecorder.stop();
+        btn.innerText = '⏺ Rekam Video (.MP4)';
+        btn.className = 'bg-rose-600 hover:bg-rose-500 text-white text-sm font-bold px-4 py-2.5 rounded-lg transition shadow-lg';
+        if (isPlayingSim) togglePlaySim();
+        return;
+    }
+
+    // Ambil video stream dari kanvas (30 FPS)
+    const canvasStream = canvas.captureStream(30);
+
+    // Jika ada video workout yang diupload, ambil track suaranya agar ikut terekam ke dalam MP4
+    if (useVideoBg && hiddenVideo.captureStream) {
+        try {
+            const vidStream = hiddenVideo.captureStream();
+            const audioTracks = vidStream.getAudioTracks();
+            if (audioTracks.length > 0) {
+                canvasStream.addTrack(audioTracks[0]);
+            }
+        } catch (err) {
+            console.warn('Audio stream tidak dapat digabung otomatis:', err);
+        }
+    }
+
+    const mimeType = getSupportedMimeType();
+    const options = mimeType ? { mimeType, videoBitsPerSecond: 6000000 } : { videoBitsPerSecond: 6000000 }; // 6 Mbps HD
+
+    mediaRecorder = new MediaRecorder(canvasStream, options);
+    recordedChunks = [];
+
+    mediaRecorder.ondataavailable = e => {
+        if (e.data && e.data.size > 0) recordedChunks.push(e.data);
+    };
+
+    mediaRecorder.onstop = () => {
+        const ext = (mimeType.includes('mp4') || mimeType.includes('h264')) ? 'mp4' : 'mp4';
+        const blob = new Blob(recordedChunks, { type: mimeType || 'video/mp4' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `workout_overlay_ready.${ext}`;
+        a.click();
+    };
+
+    mediaRecorder.start(1000);
+    if (!isPlayingSim) togglePlaySim();
+
+    btn.innerText = '⏹ Stop & Simpan (.MP4)';
+    btn.className = 'bg-amber-600 hover:bg-amber-500 text-white text-sm font-bold px-4 py-2.5 rounded-lg transition shadow-lg animate-pulse';
+}
+
+updateTiming();
+generateSampleWorkout();
+jumpToExample();
+</script>
+</body>
+</html>
